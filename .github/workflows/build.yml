@@ -1,0 +1,151 @@
+name: Build littlenavmap-qt6-base-static (x86_64)
+
+on:
+  push:
+    paths:
+      - "PKGBUILD"
+      - ".github/workflows/build.yml"
+  pull_request:
+    paths:
+      - "PKGBUILD"
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build on Arch Linux (x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      # publish the package as a release asset for littlenavmap-git's CI
+      contents: write
+    container:
+      image: archlinux:base-devel
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Update system and install build tooling
+        # Package dependencies are deliberately NOT installed here:
+        # `makepkg -s` installs them, which also verifies the PKGBUILD's
+        # makedepends are complete.
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --needed --noconfirm git sudo ccache github-cli
+          # Enable makepkg's ccache support (puts /usr/lib/ccache/bin first
+          # in PATH, which cmake picks up)
+          sed -i 's/^BUILDENV=(\(.*\)!ccache/BUILDENV=(\1ccache/' /etc/makepkg.conf
+          grep '^BUILDENV=' /etc/makepkg.conf
+
+      - name: Restore source/compiler cache
+        uses: actions/cache@v6
+        with:
+          # sources: makepkg SRCDEST (the qtbase tarball)
+          # .ccache: compiler cache, keyed on file contents so it survives
+          #          makepkg re-extracting the tarball on every run
+          path: |
+            sources
+            .ccache
+          # Always save a new cache and restore the newest one; ccache itself
+          # decides what is reusable, GitHub evicts old entries.
+          key: qt6-base-static-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            qt6-base-static-v1-
+
+      - name: Create unprivileged build user
+        run: |
+          # makepkg refuses to run as root, so create a dedicated user
+          useradd -m builder
+          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+          mkdir -p "$GITHUB_WORKSPACE/sources" "$GITHUB_WORKSPACE/.ccache"
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+
+      - name: Build package with makepkg
+        # -s: install missing deps via pacman, --needed: skip installed deps,
+        # --noconfirm: no prompts. The PKGBUILD sets !debug, so there is no
+        # split debug package.
+        env:
+          SRCDEST: ${{ github.workspace }}/sources
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_MAXSIZE: 2G
+          CCACHE_BASEDIR: ${{ github.workspace }}
+        run: |
+          sudo -u builder --preserve-env=SRCDEST,CCACHE_DIR,CCACHE_MAXSIZE,CCACHE_BASEDIR bash -c '
+            ccache -z &&
+            makepkg -s --needed --noconfirm &&
+            ccache -s
+          '
+
+      - name: Locate package file
+        id: pkgs
+        run: |
+          set -euo pipefail
+          ls -lh *.pkg.tar.*
+          main=$(ls littlenavmap-qt6-base-static-[0-9]*.pkg.tar.zst)
+          ver=${main#littlenavmap-qt6-base-static-}
+          ver=${ver%-x86_64.pkg.tar.zst}
+          echo "main=$main" >> "$GITHUB_OUTPUT"
+          echo "tag=v$ver" >> "$GITHUB_OUTPUT"
+
+      - name: Check Qt pulls in no external libraries
+        # Everything linked against this Qt (the Little Xpconnect plugin)
+        # must only NEED glibc. Any other -l in the .prl files means
+        # configure auto-detected a system library the PKGBUILD doesn't
+        # disable yet.
+        env:
+          PKG: ${{ steps.pkgs.outputs.main }}
+        run: |
+          set -euo pipefail
+          tmp=$(mktemp -d)
+          bsdtar -xf "$PKG" -C "$tmp" opt
+          grep -rh '^QMAKE_PRL_LIBS =' "$tmp/opt" | tr ' ' '\n' | grep '^-l' | sort | uniq -c
+          extra=$(grep -rh '^QMAKE_PRL_LIBS =' "$tmp/opt" | tr ' ' '\n' | grep '^-l' |
+            sort -u | grep -vxE -- '-l(m|dl|rt|resolv|pthread)' || true)
+          if [[ -n $extra ]]; then
+            echo "::error::unexpected external libraries: $(echo $extra)"
+            exit 1
+          fi
+
+      # archive: false uploads the .pkg.tar.zst itself instead of wrapping it
+      # in a zip, so the download is directly installable with `pacman -U`.
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ steps.pkgs.outputs.main }}
+          archive: false
+          if-no-files-found: error
+
+      - name: Publish package as release
+        # Artifacts expire and need a token to download; a release asset is
+        # permanent and public, so littlenavmap-git's CI can fetch it with
+        #   gh release download -R <this repo> -p '*.pkg.tar.zst'
+        # Only from the default branch, never from pull requests.
+        if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PKG: ${{ steps.pkgs.outputs.main }}
+          TAG: ${{ steps.pkgs.outputs.tag }}
+        run: |
+          set -euo pipefail
+          notes="Prebuilt static qtbase for littlenavmap-git. Install with \`sudo pacman -U $PKG\`.
+
+          sha256: \`$(sha256sum "$PKG" | cut -d' ' -f1)\`"
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # same pkgver-pkgrel rebuilt (e.g. CI change): replace the asset
+            gh release upload "$TAG" "$PKG" --clobber -R "$GITHUB_REPOSITORY"
+            gh release edit "$TAG" --notes "$notes" -R "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" "$PKG" --latest --title "$TAG" \
+              --notes "$notes" --target "$GITHUB_SHA" -R "$GITHUB_REPOSITORY"
+          fi

@@ -1,0 +1,5 @@
+- static qtbase (QtCore, Network, Sql, Xml, Concurrent; no gui) installed to /opt/littlenavmap-qt6-base-static
+- only a build dependency: it's used to build the Little Xpconnect X-Plane plugin for littlenavmap-git, nothing runs it
+- every system library qt would auto-detect is disabled or bundled, so the plugin only needs glibc (like upstream's qt5 builds)
+- building takes a while. you can skip it by installing the prebuilt package from https://github.com/Denzy7/littlenavmap-qt6-base-static_PKGBUILD/releases with `sudo pacman -U <file>`
+- only build issues should be reported here

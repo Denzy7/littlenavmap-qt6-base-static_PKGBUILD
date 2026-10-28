@@ -1,0 +1,8 @@
+src/
+pkg/
+*.log
+qtbase-everywhere-src-*.tar.xz
+littlenavmap-qt6-base-static*.pkg.tar.zst
+
+sources/
+.ccache/
