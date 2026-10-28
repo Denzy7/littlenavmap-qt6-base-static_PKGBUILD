@@ -1,12 +1,12 @@
 # Maintainer: Dennis Maina <dennismyner7@gmail.com>
 pkgname=littlenavmap-qt6-base-static
 pkgver=6.12.0
-pkgrel=1
+pkgrel=2
 pkgdesc="Static, self-contained QtCore (qtbase) for building the Little Xpconnect X-Plane plugin"
 arch=(x86_64)
 url="https://www.qt.io"
 license=('LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only')
-makedepends=(cmake ninja perl python)
+makedepends=(cmake ninja perl python openssl)
 # static archives go into a .so plugin: keep the .a files, no LTO bytecode
 options=(staticlibs !lto !debug)
 _pkgfn=qtbase-everywhere-src-$pkgver
@@ -17,7 +17,10 @@ sha256sums=('a951bd163c7b80fc6b8c88d7668fb56abf91c152373e13c10666763238131307')
 build() {
     # mirrors upstream build/linux/build_qt_static.sh, but every auto-detected
     # external library is disabled or bundled so the plugin linked against
-    # this Qt only NEEDs libc/libm/libgcc_s (like the old Qt 5 lin.xpl)
+    # this Qt only NEEDs libc/libm/libgcc_s (like the old Qt 5 lin.xpl).
+    # OpenSSL is the exception: atools needs QtNetwork's SSL API, which only
+    # exists with an OpenSSL backend. runtime = headers only, libssl is
+    # dlopen()ed by the TLS backend plugin, which xpconnect never imports
     cmake -S $_pkgfn -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=$_prefix \
@@ -42,7 +45,7 @@ build() {
         -DFEATURE_sql_psql=OFF \
         -DFEATURE_system_doubleconversion=OFF \
         -DFEATURE_system_libb2=OFF \
-        -DFEATURE_openssl=OFF \
+        -DINPUT_openssl=runtime \
         -DFEATURE_icu=OFF \
         -DFEATURE_glib=OFF \
         -DFEATURE_zstd=OFF \
